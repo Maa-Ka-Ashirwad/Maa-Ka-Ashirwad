@@ -81,7 +81,7 @@ export default function POSPage() {
     // Single atomic RPC — inserts the sale + line items + decrements stock
     // server-side (see supabase/schema.sql: create_sale). Either all of it
     // commits or none of it does.
-    const { data, error } = await supabase.rpc("create_sale", { payload });
+    const { data, error } = await supabase.rpc("create_sale", { payload } as never);
     setCharging(false);
 
     if (error) {
