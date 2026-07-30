@@ -1,0 +1,13 @@
+{
+  "name": "Maa Ka Aashirwad Supermarket — ERP",
+  "short_name": "MKA ERP",
+  "description": "Real-time billing, inventory and reporting",
+  "start_url": "/dashboard",
+  "display": "standalone",
+  "background_color": "#101B1A",
+  "theme_color": "#F2A93B",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
