@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { AlertTriangle, TrendingUp, Package, FileBarChart2, Clock, CheckCircle2 } from "lucide-react";
+import { AlertTriangle, TrendingUp, Package, FileBarChart2, Clock, CheckCircle2, Wallet } from "lucide-react";
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import { createClient } from "@/lib/supabase/client";
-import type { Product, Sale } from "@/types/database";
+import type { Product, Sale, SaleItem } from "@/types/database";
 import { KPICard } from "@/components/dashboard/KPICard";
 import { fmtINR } from "@/lib/format";
 
@@ -12,6 +12,7 @@ export default function DashboardPage() {
   const supabase = createClient();
   const [products, setProducts] = useState<Product[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
+  const [saleItems, setSaleItems] = useState<SaleItem[]>([]);
   const [loading, setLoading] = useState(true);
 
   const loadData = useCallback(async () => {
@@ -24,17 +25,29 @@ export default function DashboardPage() {
 
     setProducts(productsData ?? []);
     setSales(salesData ?? []);
+
+    // Line items are needed to compute profit (selling price vs. purchase cost
+    // per item actually sold) — fetched separately since they're keyed by sale_id.
+    const saleIds = (salesData ?? []).map((s) => s.id);
+    if (saleIds.length > 0) {
+      const { data: itemsData } = await supabase.from("sale_items").select("*").in("sale_id", saleIds);
+      setSaleItems(itemsData ?? []);
+    } else {
+      setSaleItems([]);
+    }
+
     setLoading(false);
   }, [supabase]);
 
   useEffect(() => {
     loadData();
 
-    // Real-time: any insert/update to products or sales refreshes the dashboard
-    // instantly for every logged-in user — this is the "no page refresh" requirement.
+    // Real-time: any insert/update to products, sales, or sale_items refreshes
+    // the dashboard instantly for every logged-in user — including profit.
     const channel = supabase
       .channel("dashboard-live")
       .on("postgres_changes", { event: "*", schema: "public", table: "sales" }, loadData)
+      .on("postgres_changes", { event: "*", schema: "public", table: "sale_items" }, loadData)
       .on("postgres_changes", { event: "*", schema: "public", table: "products" }, loadData)
       .subscribe();
 
@@ -52,6 +65,18 @@ export default function DashboardPage() {
   const todayRevenue = todaySales.reduce((s, x) => s + x.grand_total, 0);
   const lowStock = products.filter((p) => p.current_stock <= p.min_stock);
   const stockValue = products.reduce((s, p) => s + p.selling_price * p.current_stock, 0);
+
+  // Profit = (what each item sold for − what it cost us) × quantity, summed
+  // across today's sales. Cost comes from the product's current purchase_price
+  // (not a historical snapshot, since sale_items doesn't store cost at time of sale).
+  const costById = new Map(products.map((p) => [p.id, p.purchase_price]));
+  const todaySaleIds = new Set(todaySales.map((s) => s.id));
+  const todayProfit = saleItems
+    .filter((si) => todaySaleIds.has(si.sale_id))
+    .reduce((sum, si) => {
+      const cost = costById.get(si.product_id) ?? 0;
+      return sum + (si.unit_price - cost) * si.quantity;
+    }, 0);
 
   // group last 7 days for the revenue chart
   const chartData = Array.from({ length: 7 }).map((_, i) => {
@@ -71,8 +96,9 @@ export default function DashboardPage() {
         <p className="text-sm text-muted mt-1">Live store overview · updates automatically</p>
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
         <KPICard label="Today's Sales" value={fmtINR(todayRevenue)} icon={TrendingUp} accent="#F2A93B" />
+        <KPICard label="Today's Profit" value={fmtINR(todayProfit)} icon={Wallet} accent="#7FBF9E" />
         <KPICard label="Today's Bills" value={String(todaySales.length)} icon={FileBarChart2} accent="#C1443A" />
         <KPICard label="Stock Value" value={fmtINR(stockValue)} icon={Package} accent="#6FA8DC" />
         <KPICard label="Low Stock Items" value={String(lowStock.length)} icon={AlertTriangle} accent="#E08B7D" />
