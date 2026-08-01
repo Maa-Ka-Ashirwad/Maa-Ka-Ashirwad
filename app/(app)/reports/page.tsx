@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { FileBarChart2, Printer, Download, Calendar, Package } from "lucide-react";
+import { FileBarChart2, Printer, Download, Calendar, Package, Percent, TrendingUp } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
 import type { Sale, SaleItem, Product, Category } from "@/types/database";
 import { fmtINR } from "@/lib/format";
 
-type ReportTab = "sales" | "stock";
+type ReportTab = "sales" | "stock" | "gst" | "pnl";
 type RangeKey = "today" | "week" | "month" | "quarter" | "year" | "custom";
 type StockFilter = "all" | "low" | "out" | "over";
 
@@ -52,7 +52,7 @@ export default function ReportsPage() {
   const supabase = createClient();
   const [tab, setTab] = useState<ReportTab>("sales");
 
-  // ---- Sales report state ----
+  // ---- Shared date-range state (used by Sales, GST, and P&L tabs) ----
   const [range, setRange] = useState<RangeKey>("today");
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
@@ -83,7 +83,7 @@ export default function ReportsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supabase, range, customFrom, customTo]);
 
-  // ---- Stock report state ----
+  // ---- Products (used by Stock tab, and for cost basis in P&L tab) ----
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [stockFilter, setStockFilter] = useState<StockFilter>("all");
@@ -101,20 +101,20 @@ export default function ReportsPage() {
   }, [supabase]);
 
   useEffect(() => {
-    if (tab === "sales") loadSales();
-    if (tab === "stock") loadStock();
-  }, [tab, loadSales, loadStock]);
+    loadSales();
+    loadStock(); // always loaded — P&L needs product cost basis regardless of active tab
+  }, [loadSales, loadStock]);
 
   useEffect(() => {
     const channel = supabase
       .channel("reports-live")
-      .on("postgres_changes", { event: "*", schema: "public", table: "sales" }, () => tab === "sales" && loadSales())
-      .on("postgres_changes", { event: "*", schema: "public", table: "products" }, () => tab === "stock" && loadStock())
+      .on("postgres_changes", { event: "*", schema: "public", table: "sales" }, loadSales)
+      .on("postgres_changes", { event: "*", schema: "public", table: "products" }, loadStock)
       .subscribe();
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [supabase, tab, loadSales, loadStock]);
+  }, [supabase, loadSales, loadStock]);
 
   const summary = useMemo(() => {
     const totalBills = sales.length;
@@ -125,7 +125,8 @@ export default function ReportsPage() {
     const upi = sales.filter((s) => s.payment_method === "upi").reduce((s, x) => s + x.grand_total, 0);
     const card = sales.filter((s) => s.payment_method === "card").reduce((s, x) => s + x.grand_total, 0);
     const avgBill = totalBills > 0 ? totalSales / totalBills : 0;
-    return { totalBills, totalSales, totalGST, totalDiscount, cash, upi, card, avgBill };
+    const taxableSales = sales.reduce((s, x) => s + x.subtotal, 0);
+    return { totalBills, totalSales, totalGST, totalDiscount, cash, upi, card, avgBill, taxableSales };
   }, [sales]);
 
   const topProducts = useMemo(() => {
@@ -152,9 +153,6 @@ export default function ReportsPage() {
 
   const categoryName = (id: string | null) => categories.find((c) => c.id === id)?.name ?? "—";
 
-  // Overstock heuristic: no max_stock field exists in the schema, so "overstock"
-  // is approximated as more than 3x the minimum stock level. Adjust this
-  // multiplier if you'd like a different threshold.
   const filteredStock = useMemo(() => {
     return products.filter((p) => {
       if (stockFilter === "low") return p.current_stock > 0 && p.current_stock <= p.min_stock;
@@ -169,6 +167,29 @@ export default function ReportsPage() {
     const totalSellingValue = products.reduce((s, p) => s + p.selling_price * p.current_stock, 0);
     return { totalPurchaseValue, totalSellingValue };
   }, [products]);
+
+  // ---- GST breakdown ----
+  // CGST/SGST split assumes all sales are intra-state (the schema doesn't record
+  // buyer location or transaction type), so IGST can't be calculated separately.
+  const gst = useMemo(() => {
+    const cgst = summary.totalGST / 2;
+    const sgst = summary.totalGST / 2;
+    return { cgst, sgst };
+  }, [summary.totalGST]);
+
+  // ---- Profit & Loss ----
+  // Total Purchase Cost here = cost of goods actually SOLD (COGS), using each
+  // product's current purchase_price against every unit sold in the sale_items
+  // for this range. This is not the same as total money spent on purchase
+  // orders — that would need the Purchases module, which isn't built yet.
+  const pnl = useMemo(() => {
+    const costById = new Map(products.map((p) => [p.id, p.purchase_price]));
+    const cogs = items.reduce((sum, i) => sum + (costById.get(i.product_id) ?? 0) * i.quantity, 0);
+    const totalSalesRevenue = summary.taxableSales;
+    const grossProfit = totalSalesRevenue - cogs;
+    const netProfit = grossProfit - summary.totalDiscount;
+    return { cogs, totalSalesRevenue, grossProfit, netProfit };
+  }, [items, products, summary.taxableSales, summary.totalDiscount]);
 
   const exportSalesExcel = () => {
     const wb = XLSX.utils.book_new();
@@ -217,59 +238,72 @@ export default function ReportsPage() {
     XLSX.writeFile(wb, `Stock-Report-${stockFilter}-${new Date().toISOString().slice(0, 10)}.xlsx`);
   };
 
+  const exportGSTExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const sheet = XLSX.utils.json_to_sheet([
+      { Metric: "Taxable Sales", Value: summary.taxableSales },
+      { Metric: "Total GST Collected", Value: summary.totalGST },
+      { Metric: "CGST (assumed intra-state)", Value: gst.cgst },
+      { Metric: "SGST (assumed intra-state)", Value: gst.sgst },
+      { Metric: "IGST", Value: "Not tracked — buyer location not recorded" },
+    ]);
+    XLSX.utils.book_append_sheet(wb, sheet, "GST Summary");
+    XLSX.writeFile(wb, `GST-Report-${range}-${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
+  const exportPnLExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const sheet = XLSX.utils.json_to_sheet([
+      { Metric: "Total Sales (excl. GST)", Value: pnl.totalSalesRevenue },
+      { Metric: "Total Purchase Cost (COGS)", Value: pnl.cogs },
+      { Metric: "Gross Profit", Value: pnl.grossProfit },
+      { Metric: "Discounts Given", Value: summary.totalDiscount },
+      { Metric: "Net Profit", Value: pnl.netProfit },
+    ]);
+    XLSX.utils.book_append_sheet(wb, sheet, "Profit & Loss");
+    XLSX.writeFile(wb, `PnL-Report-${range}-${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
   const printReport = () => window.print();
+
+  const RangePicker = (
+    <div className="flex flex-wrap items-center gap-2 mb-5 print:hidden">
+      {RANGES.map((r) => (
+        <button
+          key={r.key}
+          onClick={() => setRange(r.key)}
+          className={`text-xs px-3 py-1.5 rounded-full border transition-colors ${range === r.key ? "bg-accent text-base border-accent font-semibold" : "bg-surface border-border text-muted hover:border-accent/40"}`}
+        >
+          {r.label}
+        </button>
+      ))}
+      {range === "custom" && (
+        <div className="flex items-center gap-2 ml-1">
+          <Calendar size={13} className="text-muted" />
+          <input type="date" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} className="bg-surface border border-border rounded-lg px-2 py-1.5 text-xs outline-none focus:border-accent" />
+          <span className="text-muted text-xs">to</span>
+          <input type="date" value={customTo} onChange={(e) => setCustomTo(e.target.value)} className="bg-surface border border-border rounded-lg px-2 py-1.5 text-xs outline-none focus:border-accent" />
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <div className="p-5 md:p-8 print:p-0">
-      <div className="flex items-center gap-2 mb-5 print:hidden">
-        <button
-          onClick={() => setTab("sales")}
-          className={`flex items-center gap-1.5 text-sm px-4 py-2 rounded-lg border transition-colors ${tab === "sales" ? "bg-accent text-base border-accent font-semibold" : "bg-surface border-border text-muted hover:border-accent/40"}`}
-        >
-          <FileBarChart2 size={15} /> Sales Reports
-        </button>
-        <button
-          onClick={() => setTab("stock")}
-          className={`flex items-center gap-1.5 text-sm px-4 py-2 rounded-lg border transition-colors ${tab === "stock" ? "bg-accent text-base border-accent font-semibold" : "bg-surface border-border text-muted hover:border-accent/40"}`}
-        >
-          <Package size={15} /> Stock Reports
-        </button>
+      <div className="flex flex-wrap items-center gap-2 mb-5 print:hidden">
+        <TabButton active={tab === "sales"} onClick={() => setTab("sales")} icon={FileBarChart2} label="Sales" />
+        <TabButton active={tab === "stock"} onClick={() => setTab("stock")} icon={Package} label="Stock" />
+        <TabButton active={tab === "gst"} onClick={() => setTab("gst")} icon={Percent} label="GST" />
+        <TabButton active={tab === "pnl"} onClick={() => setTab("pnl")} icon={TrendingUp} label="Profit & Loss" />
       </div>
 
       {tab === "sales" && (
         <>
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5 print:hidden">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3 print:hidden">
             <p className="text-sm text-muted">{from.toLocaleDateString("en-IN")} — {to.toLocaleDateString("en-IN")}</p>
-            <div className="flex gap-2">
-              <button onClick={printReport} className="flex items-center gap-1.5 bg-surface border border-border text-sm px-3 py-2 rounded-lg hover:border-accent">
-                <Printer size={15} /> Print
-              </button>
-              <button onClick={exportSalesExcel} className="flex items-center gap-1.5 bg-accent text-base font-semibold text-sm px-3 py-2 rounded-lg hover:brightness-105">
-                <Download size={15} /> Export Excel
-              </button>
-            </div>
+            <ExportButtons onPrint={printReport} onExport={exportSalesExcel} />
           </div>
-
-          <div className="flex flex-wrap items-center gap-2 mb-5 print:hidden">
-            {RANGES.map((r) => (
-              <button
-                key={r.key}
-                onClick={() => setRange(r.key)}
-                className={`text-xs px-3 py-1.5 rounded-full border transition-colors ${range === r.key ? "bg-accent text-base border-accent font-semibold" : "bg-surface border-border text-muted hover:border-accent/40"}`}
-              >
-                {r.label}
-              </button>
-            ))}
-            {range === "custom" && (
-              <div className="flex items-center gap-2 ml-1">
-                <Calendar size={13} className="text-muted" />
-                <input type="date" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} className="bg-surface border border-border rounded-lg px-2 py-1.5 text-xs outline-none focus:border-accent" />
-                <span className="text-muted text-xs">to</span>
-                <input type="date" value={customTo} onChange={(e) => setCustomTo(e.target.value)} className="bg-surface border border-border rounded-lg px-2 py-1.5 text-xs outline-none focus:border-accent" />
-              </div>
-            )}
-          </div>
-
+          {RangePicker}
           {loadingSales ? (
             <div className="text-muted text-sm">Loading…</div>
           ) : (
@@ -284,7 +318,6 @@ export default function ReportsPage() {
                 <SummaryCard label="Card Sales" value={fmtINR(summary.card)} />
                 <SummaryCard label="Avg. Bill Value" value={fmtINR(summary.avgBill)} />
               </div>
-
               <div className="bg-surface border border-border rounded-xl p-5 mb-6 print:hidden">
                 <h2 className="font-semibold font-display mb-4">Sales Trend</h2>
                 <ResponsiveContainer width="100%" height={220}>
@@ -297,7 +330,6 @@ export default function ReportsPage() {
                   </BarChart>
                 </ResponsiveContainer>
               </div>
-
               <div className="bg-surface border border-border rounded-xl p-5">
                 <h2 className="font-semibold font-display mb-4">Top Selling Products</h2>
                 <table className="w-full text-sm">
@@ -316,9 +348,7 @@ export default function ReportsPage() {
                         <td className="py-2 text-right font-mono">{fmtINR(p.revenue)}</td>
                       </tr>
                     ))}
-                    {topProducts.length === 0 && (
-                      <tr><td colSpan={3} className="py-6 text-center text-muted">No sales in this period.</td></tr>
-                    )}
+                    {topProducts.length === 0 && <tr><td colSpan={3} className="py-6 text-center text-muted">No sales in this period.</td></tr>}
                   </tbody>
                 </table>
               </div>
@@ -331,16 +361,8 @@ export default function ReportsPage() {
         <>
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5 print:hidden">
             <p className="text-sm text-muted">{filteredStock.length} products</p>
-            <div className="flex gap-2">
-              <button onClick={printReport} className="flex items-center gap-1.5 bg-surface border border-border text-sm px-3 py-2 rounded-lg hover:border-accent">
-                <Printer size={15} /> Print
-              </button>
-              <button onClick={exportStockExcel} className="flex items-center gap-1.5 bg-accent text-base font-semibold text-sm px-3 py-2 rounded-lg hover:brightness-105">
-                <Download size={15} /> Export Excel
-              </button>
-            </div>
+            <ExportButtons onPrint={printReport} onExport={exportStockExcel} />
           </div>
-
           <div className="flex flex-wrap gap-2 mb-5 print:hidden">
             {STOCK_FILTERS.map((f) => (
               <button
@@ -352,7 +374,6 @@ export default function ReportsPage() {
               </button>
             ))}
           </div>
-
           {loadingStock ? (
             <div className="text-muted text-sm">Loading…</div>
           ) : (
@@ -362,7 +383,6 @@ export default function ReportsPage() {
                 <SummaryCard label="Stock Value (at cost)" value={fmtINR(stockValuation.totalPurchaseValue)} />
                 <SummaryCard label="Stock Value (at selling)" value={fmtINR(stockValuation.totalSellingValue)} />
               </div>
-
               <div className="bg-surface border border-border rounded-xl overflow-hidden overflow-x-auto">
                 <table className="w-full text-sm min-w-[700px]">
                   <thead>
@@ -386,19 +406,87 @@ export default function ReportsPage() {
                         <td className="px-4 py-3 text-right font-mono">{fmtINR(p.purchase_price * p.current_stock)}</td>
                       </tr>
                     ))}
-                    {filteredStock.length === 0 && (
-                      <tr><td colSpan={6} className="px-4 py-8 text-center text-muted">No products match this filter.</td></tr>
-                    )}
+                    {filteredStock.length === 0 && <tr><td colSpan={6} className="px-4 py-8 text-center text-muted">No products match this filter.</td></tr>}
                   </tbody>
                 </table>
               </div>
-              <p className="text-xs text-muted mt-3">
-                "Overstock" is estimated as more than 3× a product's minimum stock level, since there's no separate maximum-stock field in the database yet.
-              </p>
+              <p className="text-xs text-muted mt-3">"Overstock" is estimated as more than 3× a product's minimum stock level.</p>
             </>
           )}
         </>
       )}
+
+      {tab === "gst" && (
+        <>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3 print:hidden">
+            <p className="text-sm text-muted">{from.toLocaleDateString("en-IN")} — {to.toLocaleDateString("en-IN")}</p>
+            <ExportButtons onPrint={printReport} onExport={exportGSTExcel} />
+          </div>
+          {RangePicker}
+          {loadingSales ? (
+            <div className="text-muted text-sm">Loading…</div>
+          ) : (
+            <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+              <SummaryCard label="Taxable Sales" value={fmtINR(summary.taxableSales)} />
+              <SummaryCard label="Total GST Collected" value={fmtINR(summary.totalGST)} />
+              <SummaryCard label="CGST" value={fmtINR(gst.cgst)} />
+              <SummaryCard label="SGST" value={fmtINR(gst.sgst)} />
+              <SummaryCard label="IGST" value="Not tracked" />
+            </div>
+          )}
+          <p className="text-xs text-muted mt-4">
+            CGST/SGST assumes all sales are intra-state — the app doesn't currently record buyer location or transaction type, so IGST can't be split out separately. "GST Paid" (on purchases) isn't shown since the Purchases module isn't built yet.
+          </p>
+        </>
+      )}
+
+      {tab === "pnl" && (
+        <>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3 print:hidden">
+            <p className="text-sm text-muted">{from.toLocaleDateString("en-IN")} — {to.toLocaleDateString("en-IN")}</p>
+            <ExportButtons onPrint={printReport} onExport={exportPnLExcel} />
+          </div>
+          {RangePicker}
+          {loadingSales || loadingStock ? (
+            <div className="text-muted text-sm">Loading…</div>
+          ) : (
+            <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+              <SummaryCard label="Total Sales (excl. GST)" value={fmtINR(pnl.totalSalesRevenue)} />
+              <SummaryCard label="Total Purchase Cost (COGS)" value={fmtINR(pnl.cogs)} />
+              <SummaryCard label="Gross Profit" value={fmtINR(pnl.grossProfit)} />
+              <SummaryCard label="Discounts Given" value={fmtINR(summary.totalDiscount)} />
+              <SummaryCard label="Net Profit" value={fmtINR(pnl.netProfit)} />
+            </div>
+          )}
+          <p className="text-xs text-muted mt-4">
+            "Total Purchase Cost" here is the cost of goods actually sold (COGS) — quantity sold × each product's current purchase price. This differs from total money spent on purchase orders, which would need the Purchases module (not built yet).
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
+function TabButton({ active, onClick, icon: Icon, label }: { active: boolean; onClick: () => void; icon: any; label: string }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex items-center gap-1.5 text-sm px-4 py-2 rounded-lg border transition-colors ${active ? "bg-accent text-base border-accent font-semibold" : "bg-surface border-border text-muted hover:border-accent/40"}`}
+    >
+      <Icon size={15} /> {label}
+    </button>
+  );
+}
+
+function ExportButtons({ onPrint, onExport }: { onPrint: () => void; onExport: () => void }) {
+  return (
+    <div className="flex gap-2">
+      <button onClick={onPrint} className="flex items-center gap-1.5 bg-surface border border-border text-sm px-3 py-2 rounded-lg hover:border-accent">
+        <Printer size={15} /> Print
+      </button>
+      <button onClick={onExport} className="flex items-center gap-1.5 bg-accent text-base font-semibold text-sm px-3 py-2 rounded-lg hover:brightness-105">
+        <Download size={15} /> Export Excel
+      </button>
     </div>
   );
 }
