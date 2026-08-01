@@ -22,6 +22,7 @@ export type Product = {
   mfg_date: string | null;
   expiry_date: string | null;
   batch_number: string | null;
+  purchase_date: string | null;
   description: string | null;
   is_active: boolean;
   created_at: string;
