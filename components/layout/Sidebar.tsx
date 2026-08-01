@@ -2,13 +2,14 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { LayoutDashboard, ShoppingCart, Package, FileBarChart2, Users, Truck, Settings, LogOut } from "lucide-react";
+import { LayoutDashboard, ShoppingCart, Package, FileBarChart2, Users, Truck, Settings, LogOut, AlertTriangle } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 
 const LINKS = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/pos", label: "Billing (POS)", icon: ShoppingCart },
   { href: "/products", label: "Products", icon: Package },
+  { href: "/expiry", label: "Expiry Alerts", icon: AlertTriangle },
   { href: "/customers", label: "Customers", icon: Users },
   { href: "/suppliers", label: "Suppliers", icon: Truck },
   { href: "/reports", label: "Reports", icon: FileBarChart2 },
@@ -42,7 +43,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
         </div>
       </div>
 
-      <nav className="flex-1 p-3 space-y-1">
+      <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
         {LINKS.map(({ href, label, icon: Icon }) => {
           const active = pathname === href;
           return (
