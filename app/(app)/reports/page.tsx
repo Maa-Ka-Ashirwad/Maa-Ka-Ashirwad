@@ -1,14 +1,16 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { FileBarChart2, Printer, Download, Calendar } from "lucide-react";
+import { FileBarChart2, Printer, Download, Calendar, Package } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
-import type { Sale, SaleItem } from "@/types/database";
+import type { Sale, SaleItem, Product, Category } from "@/types/database";
 import { fmtINR } from "@/lib/format";
 
+type ReportTab = "sales" | "stock";
 type RangeKey = "today" | "week" | "month" | "quarter" | "year" | "custom";
+type StockFilter = "all" | "low" | "out" | "over";
 
 const RANGES: { key: RangeKey; label: string }[] = [
   { key: "today", label: "Daily" },
@@ -17,6 +19,13 @@ const RANGES: { key: RangeKey; label: string }[] = [
   { key: "quarter", label: "Quarterly" },
   { key: "year", label: "Annual" },
   { key: "custom", label: "Custom" },
+];
+
+const STOCK_FILTERS: { key: StockFilter; label: string }[] = [
+  { key: "all", label: "Current Stock" },
+  { key: "low", label: "Low Stock" },
+  { key: "out", label: "Out of Stock" },
+  { key: "over", label: "Overstock" },
 ];
 
 function getRangeDates(range: RangeKey, customFrom: string, customTo: string): { from: Date; to: Date } {
@@ -41,17 +50,20 @@ function getRangeDates(range: RangeKey, customFrom: string, customTo: string): {
 
 export default function ReportsPage() {
   const supabase = createClient();
+  const [tab, setTab] = useState<ReportTab>("sales");
+
+  // ---- Sales report state ----
   const [range, setRange] = useState<RangeKey>("today");
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
   const [sales, setSales] = useState<Sale[]>([]);
   const [items, setItems] = useState<SaleItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loadingSales, setLoadingSales] = useState(true);
 
   const { from, to } = getRangeDates(range, customFrom, customTo);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const loadSales = useCallback(async () => {
+    setLoadingSales(true);
     const { data: salesData } = await supabase
       .from("sales")
       .select("*")
@@ -67,20 +79,42 @@ export default function ReportsPage() {
     } else {
       setItems([]);
     }
-    setLoading(false);
+    setLoadingSales(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supabase, range, customFrom, customTo]);
 
+  // ---- Stock report state ----
+  const [products, setProducts] = useState<Product[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [stockFilter, setStockFilter] = useState<StockFilter>("all");
+  const [loadingStock, setLoadingStock] = useState(true);
+
+  const loadStock = useCallback(async () => {
+    setLoadingStock(true);
+    const [{ data: productsData }, { data: categoriesData }] = await Promise.all([
+      supabase.from("products").select("*").eq("is_active", true).order("name"),
+      supabase.from("categories").select("*"),
+    ]);
+    setProducts(productsData ?? []);
+    setCategories(categoriesData ?? []);
+    setLoadingStock(false);
+  }, [supabase]);
+
   useEffect(() => {
-    load();
+    if (tab === "sales") loadSales();
+    if (tab === "stock") loadStock();
+  }, [tab, loadSales, loadStock]);
+
+  useEffect(() => {
     const channel = supabase
       .channel("reports-live")
-      .on("postgres_changes", { event: "*", schema: "public", table: "sales" }, load)
+      .on("postgres_changes", { event: "*", schema: "public", table: "sales" }, () => tab === "sales" && loadSales())
+      .on("postgres_changes", { event: "*", schema: "public", table: "products" }, () => tab === "stock" && loadStock())
       .subscribe();
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [supabase, load]);
+  }, [supabase, tab, loadSales, loadStock]);
 
   const summary = useMemo(() => {
     const totalBills = sales.length;
@@ -116,9 +150,28 @@ export default function ReportsPage() {
     });
   }, [sales, from, to]);
 
-  const exportExcel = () => {
-    const wb = XLSX.utils.book_new();
+  const categoryName = (id: string | null) => categories.find((c) => c.id === id)?.name ?? "—";
 
+  // Overstock heuristic: no max_stock field exists in the schema, so "overstock"
+  // is approximated as more than 3x the minimum stock level. Adjust this
+  // multiplier if you'd like a different threshold.
+  const filteredStock = useMemo(() => {
+    return products.filter((p) => {
+      if (stockFilter === "low") return p.current_stock > 0 && p.current_stock <= p.min_stock;
+      if (stockFilter === "out") return p.current_stock <= 0;
+      if (stockFilter === "over") return p.min_stock > 0 && p.current_stock > p.min_stock * 3;
+      return true;
+    });
+  }, [products, stockFilter]);
+
+  const stockValuation = useMemo(() => {
+    const totalPurchaseValue = products.reduce((s, p) => s + p.purchase_price * p.current_stock, 0);
+    const totalSellingValue = products.reduce((s, p) => s + p.selling_price * p.current_stock, 0);
+    return { totalPurchaseValue, totalSellingValue };
+  }, [products]);
+
+  const exportSalesExcel = () => {
+    const wb = XLSX.utils.book_new();
     const summarySheet = XLSX.utils.json_to_sheet([
       { Metric: "Total Bills", Value: summary.totalBills },
       { Metric: "Total Sales Amount", Value: summary.totalSales },
@@ -130,7 +183,6 @@ export default function ReportsPage() {
       { Metric: "Average Bill Value", Value: Math.round(summary.avgBill) },
     ]);
     XLSX.utils.book_append_sheet(wb, summarySheet, "Summary");
-
     const salesSheet = XLSX.utils.json_to_sheet(
       sales.map((s) => ({
         Invoice: s.invoice_number,
@@ -143,110 +195,210 @@ export default function ReportsPage() {
       }))
     );
     XLSX.utils.book_append_sheet(wb, salesSheet, "Bills");
-
-    const productsSheet = XLSX.utils.json_to_sheet(
-      topProducts.map((p) => ({ Product: p.name, "Qty Sold": p.qty, Revenue: p.revenue }))
-    );
+    const productsSheet = XLSX.utils.json_to_sheet(topProducts.map((p) => ({ Product: p.name, "Qty Sold": p.qty, Revenue: p.revenue })));
     XLSX.utils.book_append_sheet(wb, productsSheet, "Top Products");
-
     XLSX.writeFile(wb, `Sales-Report-${range}-${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
+  const exportStockExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const sheet = XLSX.utils.json_to_sheet(
+      filteredStock.map((p) => ({
+        Product: p.name,
+        Category: categoryName(p.category_id),
+        "Stock Qty": p.current_stock,
+        Unit: p.unit,
+        "Purchase Price": p.purchase_price,
+        "Selling Price": p.selling_price,
+        "Inventory Value (at cost)": p.purchase_price * p.current_stock,
+      }))
+    );
+    XLSX.utils.book_append_sheet(wb, sheet, "Stock");
+    XLSX.writeFile(wb, `Stock-Report-${stockFilter}-${new Date().toISOString().slice(0, 10)}.xlsx`);
   };
 
   const printReport = () => window.print();
 
-  if (loading) return <div className="p-8 text-muted text-sm">Loading report…</div>;
-
   return (
     <div className="p-5 md:p-8 print:p-0">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5 print:hidden">
-        <div>
-          <h1 className="text-2xl font-bold font-display flex items-center gap-2">
-            <FileBarChart2 size={22} /> Sales Reports
-          </h1>
-          <p className="text-sm text-muted mt-1">
-            {from.toLocaleDateString("en-IN")} — {to.toLocaleDateString("en-IN")}
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <button onClick={printReport} className="flex items-center gap-1.5 bg-surface border border-border text-sm px-3 py-2 rounded-lg hover:border-accent">
-            <Printer size={15} /> Print
-          </button>
-          <button onClick={exportExcel} className="flex items-center gap-1.5 bg-accent text-base font-semibold text-sm px-3 py-2 rounded-lg hover:brightness-105">
-            <Download size={15} /> Export Excel
-          </button>
-        </div>
+      <div className="flex items-center gap-2 mb-5 print:hidden">
+        <button
+          onClick={() => setTab("sales")}
+          className={`flex items-center gap-1.5 text-sm px-4 py-2 rounded-lg border transition-colors ${tab === "sales" ? "bg-accent text-base border-accent font-semibold" : "bg-surface border-border text-muted hover:border-accent/40"}`}
+        >
+          <FileBarChart2 size={15} /> Sales Reports
+        </button>
+        <button
+          onClick={() => setTab("stock")}
+          className={`flex items-center gap-1.5 text-sm px-4 py-2 rounded-lg border transition-colors ${tab === "stock" ? "bg-accent text-base border-accent font-semibold" : "bg-surface border-border text-muted hover:border-accent/40"}`}
+        >
+          <Package size={15} /> Stock Reports
+        </button>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2 mb-5 print:hidden">
-        {RANGES.map((r) => (
-          <button
-            key={r.key}
-            onClick={() => setRange(r.key)}
-            className={`text-xs px-3 py-1.5 rounded-full border transition-colors ${
-              range === r.key ? "bg-accent text-base border-accent font-semibold" : "bg-surface border-border text-muted hover:border-accent/40"
-            }`}
-          >
-            {r.label}
-          </button>
-        ))}
-        {range === "custom" && (
-          <div className="flex items-center gap-2 ml-1">
-            <Calendar size={13} className="text-muted" />
-            <input type="date" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} className="bg-surface border border-border rounded-lg px-2 py-1.5 text-xs outline-none focus:border-accent" />
-            <span className="text-muted text-xs">to</span>
-            <input type="date" value={customTo} onChange={(e) => setCustomTo(e.target.value)} className="bg-surface border border-border rounded-lg px-2 py-1.5 text-xs outline-none focus:border-accent" />
+      {tab === "sales" && (
+        <>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5 print:hidden">
+            <p className="text-sm text-muted">{from.toLocaleDateString("en-IN")} — {to.toLocaleDateString("en-IN")}</p>
+            <div className="flex gap-2">
+              <button onClick={printReport} className="flex items-center gap-1.5 bg-surface border border-border text-sm px-3 py-2 rounded-lg hover:border-accent">
+                <Printer size={15} /> Print
+              </button>
+              <button onClick={exportSalesExcel} className="flex items-center gap-1.5 bg-accent text-base font-semibold text-sm px-3 py-2 rounded-lg hover:brightness-105">
+                <Download size={15} /> Export Excel
+              </button>
+            </div>
           </div>
-        )}
-      </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
-        <SummaryCard label="Total Bills" value={String(summary.totalBills)} />
-        <SummaryCard label="Total Sales" value={fmtINR(summary.totalSales)} />
-        <SummaryCard label="GST Collected" value={fmtINR(summary.totalGST)} />
-        <SummaryCard label="Discounts Given" value={fmtINR(summary.totalDiscount)} />
-        <SummaryCard label="Cash Sales" value={fmtINR(summary.cash)} />
-        <SummaryCard label="UPI Sales" value={fmtINR(summary.upi)} />
-        <SummaryCard label="Card Sales" value={fmtINR(summary.card)} />
-        <SummaryCard label="Avg. Bill Value" value={fmtINR(summary.avgBill)} />
-      </div>
-
-      <div className="bg-surface border border-border rounded-xl p-5 mb-6 print:hidden">
-        <h2 className="font-semibold font-display mb-4">Sales Trend</h2>
-        <ResponsiveContainer width="100%" height={220}>
-          <BarChart data={chartData}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#243733" vertical={false} />
-            <XAxis dataKey="day" stroke="#8FA39E" fontSize={11} tickLine={false} axisLine={false} />
-            <YAxis stroke="#8FA39E" fontSize={11} tickLine={false} axisLine={false} tickFormatter={(v) => `₹${v / 1000}k`} />
-            <Tooltip contentStyle={{ background: "#101B1A", border: "1px solid #243733", borderRadius: 8, fontSize: 12 }} formatter={(v: number) => fmtINR(v)} />
-            <Bar dataKey="sales" fill="#F2A93B" radius={[4, 4, 0, 0]} />
-          </BarChart>
-        </ResponsiveContainer>
-      </div>
-
-      <div className="bg-surface border border-border rounded-xl p-5">
-        <h2 className="font-semibold font-display mb-4">Top Selling Products</h2>
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-left text-[11px] uppercase tracking-wider text-muted border-b border-border">
-              <th className="py-2 font-medium">Product</th>
-              <th className="py-2 font-medium text-right">Qty Sold</th>
-              <th className="py-2 font-medium text-right">Revenue</th>
-            </tr>
-          </thead>
-          <tbody>
-            {topProducts.map((p) => (
-              <tr key={p.name} className="border-b border-border last:border-0">
-                <td className="py-2">{p.name}</td>
-                <td className="py-2 text-right font-mono">{p.qty}</td>
-                <td className="py-2 text-right font-mono">{fmtINR(p.revenue)}</td>
-              </tr>
+          <div className="flex flex-wrap items-center gap-2 mb-5 print:hidden">
+            {RANGES.map((r) => (
+              <button
+                key={r.key}
+                onClick={() => setRange(r.key)}
+                className={`text-xs px-3 py-1.5 rounded-full border transition-colors ${range === r.key ? "bg-accent text-base border-accent font-semibold" : "bg-surface border-border text-muted hover:border-accent/40"}`}
+              >
+                {r.label}
+              </button>
             ))}
-            {topProducts.length === 0 && (
-              <tr><td colSpan={3} className="py-6 text-center text-muted">No sales in this period.</td></tr>
+            {range === "custom" && (
+              <div className="flex items-center gap-2 ml-1">
+                <Calendar size={13} className="text-muted" />
+                <input type="date" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} className="bg-surface border border-border rounded-lg px-2 py-1.5 text-xs outline-none focus:border-accent" />
+                <span className="text-muted text-xs">to</span>
+                <input type="date" value={customTo} onChange={(e) => setCustomTo(e.target.value)} className="bg-surface border border-border rounded-lg px-2 py-1.5 text-xs outline-none focus:border-accent" />
+              </div>
             )}
-          </tbody>
-        </table>
-      </div>
+          </div>
+
+          {loadingSales ? (
+            <div className="text-muted text-sm">Loading…</div>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
+                <SummaryCard label="Total Bills" value={String(summary.totalBills)} />
+                <SummaryCard label="Total Sales" value={fmtINR(summary.totalSales)} />
+                <SummaryCard label="GST Collected" value={fmtINR(summary.totalGST)} />
+                <SummaryCard label="Discounts Given" value={fmtINR(summary.totalDiscount)} />
+                <SummaryCard label="Cash Sales" value={fmtINR(summary.cash)} />
+                <SummaryCard label="UPI Sales" value={fmtINR(summary.upi)} />
+                <SummaryCard label="Card Sales" value={fmtINR(summary.card)} />
+                <SummaryCard label="Avg. Bill Value" value={fmtINR(summary.avgBill)} />
+              </div>
+
+              <div className="bg-surface border border-border rounded-xl p-5 mb-6 print:hidden">
+                <h2 className="font-semibold font-display mb-4">Sales Trend</h2>
+                <ResponsiveContainer width="100%" height={220}>
+                  <BarChart data={chartData}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#243733" vertical={false} />
+                    <XAxis dataKey="day" stroke="#8FA39E" fontSize={11} tickLine={false} axisLine={false} />
+                    <YAxis stroke="#8FA39E" fontSize={11} tickLine={false} axisLine={false} tickFormatter={(v) => `₹${v / 1000}k`} />
+                    <Tooltip contentStyle={{ background: "#101B1A", border: "1px solid #243733", borderRadius: 8, fontSize: 12 }} formatter={(v: number) => fmtINR(v)} />
+                    <Bar dataKey="sales" fill="#F2A93B" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+
+              <div className="bg-surface border border-border rounded-xl p-5">
+                <h2 className="font-semibold font-display mb-4">Top Selling Products</h2>
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-[11px] uppercase tracking-wider text-muted border-b border-border">
+                      <th className="py-2 font-medium">Product</th>
+                      <th className="py-2 font-medium text-right">Qty Sold</th>
+                      <th className="py-2 font-medium text-right">Revenue</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {topProducts.map((p) => (
+                      <tr key={p.name} className="border-b border-border last:border-0">
+                        <td className="py-2">{p.name}</td>
+                        <td className="py-2 text-right font-mono">{p.qty}</td>
+                        <td className="py-2 text-right font-mono">{fmtINR(p.revenue)}</td>
+                      </tr>
+                    ))}
+                    {topProducts.length === 0 && (
+                      <tr><td colSpan={3} className="py-6 text-center text-muted">No sales in this period.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </>
+      )}
+
+      {tab === "stock" && (
+        <>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5 print:hidden">
+            <p className="text-sm text-muted">{filteredStock.length} products</p>
+            <div className="flex gap-2">
+              <button onClick={printReport} className="flex items-center gap-1.5 bg-surface border border-border text-sm px-3 py-2 rounded-lg hover:border-accent">
+                <Printer size={15} /> Print
+              </button>
+              <button onClick={exportStockExcel} className="flex items-center gap-1.5 bg-accent text-base font-semibold text-sm px-3 py-2 rounded-lg hover:brightness-105">
+                <Download size={15} /> Export Excel
+              </button>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-2 mb-5 print:hidden">
+            {STOCK_FILTERS.map((f) => (
+              <button
+                key={f.key}
+                onClick={() => setStockFilter(f.key)}
+                className={`text-xs px-3 py-1.5 rounded-full border transition-colors ${stockFilter === f.key ? "bg-accent text-base border-accent font-semibold" : "bg-surface border-border text-muted hover:border-accent/40"}`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+
+          {loadingStock ? (
+            <div className="text-muted text-sm">Loading…</div>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 mb-6">
+                <SummaryCard label="Total Products" value={String(products.length)} />
+                <SummaryCard label="Stock Value (at cost)" value={fmtINR(stockValuation.totalPurchaseValue)} />
+                <SummaryCard label="Stock Value (at selling)" value={fmtINR(stockValuation.totalSellingValue)} />
+              </div>
+
+              <div className="bg-surface border border-border rounded-xl overflow-hidden overflow-x-auto">
+                <table className="w-full text-sm min-w-[700px]">
+                  <thead>
+                    <tr className="text-left text-[11px] uppercase tracking-wider text-muted border-b border-border">
+                      <th className="px-4 py-3 font-medium">Product</th>
+                      <th className="px-4 py-3 font-medium">Category</th>
+                      <th className="px-4 py-3 font-medium text-right">Stock Qty</th>
+                      <th className="px-4 py-3 font-medium text-right">Purchase Price</th>
+                      <th className="px-4 py-3 font-medium text-right">Selling Price</th>
+                      <th className="px-4 py-3 font-medium text-right">Inventory Value</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredStock.map((p) => (
+                      <tr key={p.id} className="border-b border-border last:border-0 hover:bg-surface-elevated/60">
+                        <td className="px-4 py-3 font-medium">{p.name}</td>
+                        <td className="px-4 py-3 text-muted text-xs">{categoryName(p.category_id)}</td>
+                        <td className="px-4 py-3 text-right font-mono">{p.current_stock} {p.unit}</td>
+                        <td className="px-4 py-3 text-right font-mono">{fmtINR(p.purchase_price)}</td>
+                        <td className="px-4 py-3 text-right font-mono">{fmtINR(p.selling_price)}</td>
+                        <td className="px-4 py-3 text-right font-mono">{fmtINR(p.purchase_price * p.current_stock)}</td>
+                      </tr>
+                    ))}
+                    {filteredStock.length === 0 && (
+                      <tr><td colSpan={6} className="px-4 py-8 text-center text-muted">No products match this filter.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-xs text-muted mt-3">
+                "Overstock" is estimated as more than 3× a product's minimum stock level, since there's no separate maximum-stock field in the database yet.
+              </p>
+            </>
+          )}
+        </>
+      )}
     </div>
   );
 }
