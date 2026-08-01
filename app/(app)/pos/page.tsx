@@ -1,14 +1,27 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { Search, Plus, Minus, Trash2, ShoppingCart, Percent, Banknote, Smartphone, CreditCard, CheckCircle2, AlertTriangle } from "lucide-react";
+import { Search, Plus, Minus, Trash2, ShoppingCart, Percent, Banknote, Smartphone, CreditCard, CheckCircle2, AlertTriangle, Printer, Download, User } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import type { Product } from "@/types/database";
 import { fmtINR } from "@/lib/format";
 import { Receipt, type BillItem } from "@/components/pos/Receipt";
 import { daysRemaining, expiryStatus } from "@/lib/expiry";
+import { downloadInvoicePDF } from "@/lib/invoice";
 
 type CartItem = Product & { qty: number };
+type LastBill = {
+  invoice_number: string;
+  items: BillItem[];
+  subtotal: number;
+  gstTotal: number;
+  discountAmt: number;
+  discountPct: number;
+  grandTotal: number;
+  payment: string;
+  customerName?: string;
+  createdAt: string;
+};
 
 export default function POSPage() {
   const supabase = createClient();
@@ -17,7 +30,8 @@ export default function POSPage() {
   const [cart, setCart] = useState<CartItem[]>([]);
   const [discountPct, setDiscountPct] = useState(0);
   const [payment, setPayment] = useState<"cash" | "upi" | "card">("upi");
-  const [lastBill, setLastBill] = useState<{ invoice_number: string; items: BillItem[]; subtotal: number; gstTotal: number; discountAmt: number; discountPct: number; grandTotal: number; payment: string } | null>(null);
+  const [customerName, setCustomerName] = useState("");
+  const [lastBill, setLastBill] = useState<LastBill | null>(null);
   const [charging, setCharging] = useState(false);
 
   const loadProducts = useCallback(async () => {
@@ -72,8 +86,6 @@ export default function POSPage() {
   const chargeBill = async () => {
     if (cart.length === 0) return;
 
-    // Final safety check — block checkout if anything in the cart expired
-    // between being added and now (e.g. a long browsing session overnight).
     const expiredInCart = cart.find((i) => expiryStatus(i.expiry_date) === "expired");
     if (expiredInCart) {
       alert(`"${expiredInCart.name}" has expired and cannot be sold. Please remove it from the cart.`);
@@ -109,19 +121,49 @@ export default function POSPage() {
 
     setLastBill({
       invoice_number: (data as any).invoice_number,
-      items: cart.map((i) => ({ name: i.name, qty: i.qty, price: i.selling_price })),
+      items: cart.map((i) => ({ name: i.name, qty: i.qty, price: i.selling_price, gstRate: i.gst_rate })),
       subtotal,
       gstTotal,
       discountAmt,
       discountPct,
       grandTotal,
       payment,
+      customerName: customerName.trim() || undefined,
+      createdAt: new Date().toISOString(),
     });
+  };
+
+  const printBill = () => {
+    window.print();
+  };
+
+  const downloadPDF = () => {
+    if (!lastBill) return;
+    downloadInvoicePDF(
+      {
+        invoice_number: lastBill.invoice_number,
+        createdAt: lastBill.createdAt,
+        items: lastBill.items,
+        subtotal: lastBill.subtotal,
+        gstTotal: lastBill.gstTotal,
+        discountAmt: lastBill.discountAmt,
+        discountPct: lastBill.discountPct,
+        grandTotal: lastBill.grandTotal,
+        payment: lastBill.payment,
+        customerName: lastBill.customerName,
+      },
+      {
+        name: process.env.NEXT_PUBLIC_STORE_NAME ?? "Maa Ka Aashirwad Supermarket",
+        address: process.env.NEXT_PUBLIC_STORE_ADDRESS,
+        gstin: process.env.NEXT_PUBLIC_STORE_GSTIN,
+      }
+    );
   };
 
   const newSale = () => {
     setCart([]);
     setDiscountPct(0);
+    setCustomerName("");
     setLastBill(null);
   };
 
@@ -133,7 +175,7 @@ export default function POSPage() {
 
   return (
     <div className="flex flex-col lg:flex-row h-full">
-      <div className="flex-1 p-5 md:p-6 overflow-y-auto">
+      <div className="flex-1 p-5 md:p-6 overflow-y-auto print:hidden">
         <div className="relative mb-4">
           <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
           <input
@@ -186,14 +228,14 @@ export default function POSPage() {
       <div className="w-full lg:w-[380px] bg-base border-t lg:border-t-0 lg:border-l border-border flex flex-col shrink-0">
         {!lastBill ? (
           <>
-            <div className="p-4 border-b border-border flex items-center justify-between">
+            <div className="p-4 border-b border-border flex items-center justify-between print:hidden">
               <h2 className="font-semibold font-display flex items-center gap-2">
                 <ShoppingCart size={17} /> Cart
               </h2>
               <span className="text-xs text-muted font-mono">{cart.length} items</span>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-[160px]">
+            <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-[160px] print:hidden">
               {cart.length === 0 && <div className="text-center text-sm text-muted mt-10">Tap a product to add it to the bill.</div>}
               {cart.map((i) => (
                 <div key={i.id} className="flex items-center gap-2.5">
@@ -217,7 +259,17 @@ export default function POSPage() {
               ))}
             </div>
 
-            <div className="p-4 border-t border-border space-y-3">
+            <div className="p-4 border-t border-border space-y-3 print:hidden">
+              <div className="flex items-center gap-2">
+                <User size={13} className="text-muted shrink-0" />
+                <input
+                  value={customerName}
+                  onChange={(e) => setCustomerName(e.target.value)}
+                  placeholder="Customer name (optional)"
+                  className="flex-1 bg-surface border border-border rounded-lg px-2.5 py-1.5 text-xs outline-none focus:border-accent"
+                />
+              </div>
+
               <div className="flex items-center gap-2">
                 <Percent size={13} className="text-muted" />
                 <span className="text-xs text-muted">Discount</span>
@@ -260,12 +312,20 @@ export default function POSPage() {
           </>
         ) : (
           <div className="flex-1 flex flex-col p-4 overflow-y-auto">
-            <div className="flex items-center gap-2 mb-3 text-good">
+            <div className="flex items-center gap-2 mb-3 text-good print:hidden">
               <CheckCircle2 size={16} />
               <span className="text-sm font-medium">Payment received</span>
             </div>
             <Receipt bill={lastBill} />
-            <button onClick={newSale} className="w-full mt-4 bg-accent text-base font-semibold text-sm py-3 rounded-lg hover:brightness-105 transition">
+            <div className="grid grid-cols-2 gap-2 mt-4 print:hidden">
+              <button onClick={printBill} className="flex items-center justify-center gap-1.5 bg-surface border border-border text-sm py-2.5 rounded-lg hover:border-accent transition">
+                <Printer size={15} /> Print Bill
+              </button>
+              <button onClick={downloadPDF} className="flex items-center justify-center gap-1.5 bg-surface border border-border text-sm py-2.5 rounded-lg hover:border-accent transition">
+                <Download size={15} /> Download PDF
+              </button>
+            </div>
+            <button onClick={newSale} className="w-full mt-2 bg-accent text-base font-semibold text-sm py-3 rounded-lg hover:brightness-105 transition print:hidden">
               New Sale
             </button>
           </div>
