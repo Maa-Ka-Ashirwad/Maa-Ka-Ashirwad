@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { FileBarChart2, Printer, Download, Calendar, Package, Percent, TrendingUp } from "lucide-react";
+import { FileBarChart2, Printer, Download, Calendar, Package, Percent, TrendingUp, ClipboardList } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
-import type { Sale, SaleItem, Product, Category } from "@/types/database";
+import type { Sale, SaleItem, Product, Category, Purchase, PurchaseItem, Supplier } from "@/types/database";
 import { fmtINR } from "@/lib/format";
 
-type ReportTab = "sales" | "stock" | "gst" | "pnl";
+type ReportTab = "sales" | "stock" | "gst" | "pnl" | "purchase";
 type RangeKey = "today" | "week" | "month" | "quarter" | "year" | "custom";
 type StockFilter = "all" | "low" | "out" | "over";
 
@@ -100,21 +100,49 @@ export default function ReportsPage() {
     setLoadingStock(false);
   }, [supabase]);
 
+  // ---- Purchases (used by Purchase Reports tab, and GST Paid in GST tab) ----
+  const [purchases, setPurchases] = useState<Purchase[]>([]);
+  const [purchaseItems, setPurchaseItems] = useState<PurchaseItem[]>([]);
+  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  const [loadingPurchases, setLoadingPurchases] = useState(true);
+
+  const loadPurchases = useCallback(async () => {
+    setLoadingPurchases(true);
+    const [{ data: purchasesData }, { data: suppliersData }] = await Promise.all([
+      supabase.from("purchases").select("*").gte("created_at", from.toISOString()).lte("created_at", to.toISOString()).order("created_at", { ascending: false }),
+      supabase.from("suppliers").select("*"),
+    ]);
+    setPurchases(purchasesData ?? []);
+    setSuppliers(suppliersData ?? []);
+
+    const purchaseIds = (purchasesData ?? []).map((p) => p.id);
+    if (purchaseIds.length > 0) {
+      const { data: itemsData } = await supabase.from("purchase_items").select("*").in("purchase_id", purchaseIds);
+      setPurchaseItems(itemsData ?? []);
+    } else {
+      setPurchaseItems([]);
+    }
+    setLoadingPurchases(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [supabase, range, customFrom, customTo]);
+
   useEffect(() => {
     loadSales();
     loadStock(); // always loaded — P&L needs product cost basis regardless of active tab
-  }, [loadSales, loadStock]);
+    loadPurchases();
+  }, [loadSales, loadStock, loadPurchases]);
 
   useEffect(() => {
     const channel = supabase
       .channel("reports-live")
       .on("postgres_changes", { event: "*", schema: "public", table: "sales" }, loadSales)
       .on("postgres_changes", { event: "*", schema: "public", table: "products" }, loadStock)
+      .on("postgres_changes", { event: "*", schema: "public", table: "purchases" }, loadPurchases)
       .subscribe();
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [supabase, loadSales, loadStock]);
+  }, [supabase, loadSales, loadStock, loadPurchases]);
 
   const summary = useMemo(() => {
     const totalBills = sales.length;
@@ -174,8 +202,42 @@ export default function ReportsPage() {
   const gst = useMemo(() => {
     const cgst = summary.totalGST / 2;
     const sgst = summary.totalGST / 2;
-    return { cgst, sgst };
-  }, [summary.totalGST]);
+    const gstPaid = purchaseItems.reduce((s, i) => s + (i.purchase_price * i.quantity * i.gst_rate) / 100, 0);
+    return { cgst, sgst, gstPaid };
+  }, [summary.totalGST, purchaseItems]);
+
+  // ---- Purchase Reports ----
+  const purchaseSummary = useMemo(() => {
+    const totalPurchaseValue = purchases.reduce((s, p) => s + p.total_amount, 0);
+    const totalQty = purchaseItems.reduce((s, i) => s + i.quantity, 0);
+    const supplierMap = new Map(suppliers.map((s) => [s.id, s.name]));
+
+    const bySupplier = new Map<string, { supplier: string; value: number; bills: number }>();
+    for (const p of purchases) {
+      const name = supplierMap.get(p.supplier_id) ?? "Unknown";
+      const existing = bySupplier.get(name) ?? { supplier: name, value: 0, bills: 0 };
+      existing.value += p.total_amount;
+      existing.bills += 1;
+      bySupplier.set(name, existing);
+    }
+
+    const productMap = new Map(products.map((p) => [p.id, p.name]));
+    const byProduct = new Map<string, { product: string; qty: number; value: number }>();
+    for (const item of purchaseItems) {
+      const name = productMap.get(item.product_id) ?? "Unknown product";
+      const existing = byProduct.get(name) ?? { product: name, qty: 0, value: 0 };
+      existing.qty += item.quantity;
+      existing.value += item.line_total;
+      byProduct.set(name, existing);
+    }
+
+    return {
+      totalPurchaseValue,
+      totalQty,
+      bySupplier: Array.from(bySupplier.values()).sort((a, b) => b.value - a.value),
+      byProduct: Array.from(byProduct.values()).sort((a, b) => b.value - a.value),
+    };
+  }, [purchases, purchaseItems, suppliers, products]);
 
   // ---- Profit & Loss ----
   // Total Purchase Cost here = cost of goods actually SOLD (COGS), using each
@@ -264,6 +326,19 @@ export default function ReportsPage() {
     XLSX.writeFile(wb, `PnL-Report-${range}-${new Date().toISOString().slice(0, 10)}.xlsx`);
   };
 
+  const exportPurchaseExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const bySupplierSheet = XLSX.utils.json_to_sheet(purchaseSummary.bySupplier.map((s) => ({ Supplier: s.supplier, Bills: s.bills, "Purchase Value": s.value })));
+    XLSX.utils.book_append_sheet(wb, bySupplierSheet, "By Supplier");
+    const byProductSheet = XLSX.utils.json_to_sheet(purchaseSummary.byProduct.map((p) => ({ Product: p.product, "Qty Purchased": p.qty, "Purchase Value": p.value })));
+    XLSX.utils.book_append_sheet(wb, byProductSheet, "By Product");
+    const listSheet = XLSX.utils.json_to_sheet(
+      purchases.map((p) => ({ Invoice: p.invoice_number, Date: new Date(p.created_at).toLocaleDateString("en-IN"), Total: p.total_amount }))
+    );
+    XLSX.utils.book_append_sheet(wb, listSheet, "Purchases");
+    XLSX.writeFile(wb, `Purchase-Report-${range}-${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
   const printReport = () => window.print();
 
   const RangePicker = (
@@ -293,6 +368,7 @@ export default function ReportsPage() {
       <div className="flex flex-wrap items-center gap-2 mb-5 print:hidden">
         <TabButton active={tab === "sales"} onClick={() => setTab("sales")} icon={FileBarChart2} label="Sales" />
         <TabButton active={tab === "stock"} onClick={() => setTab("stock")} icon={Package} label="Stock" />
+        <TabButton active={tab === "purchase"} onClick={() => setTab("purchase")} icon={ClipboardList} label="Purchase" />
         <TabButton active={tab === "gst"} onClick={() => setTab("gst")} icon={Percent} label="GST" />
         <TabButton active={tab === "pnl"} onClick={() => setTab("pnl")} icon={TrendingUp} label="Profit & Loss" />
       </div>
@@ -432,11 +508,79 @@ export default function ReportsPage() {
               <SummaryCard label="CGST" value={fmtINR(gst.cgst)} />
               <SummaryCard label="SGST" value={fmtINR(gst.sgst)} />
               <SummaryCard label="IGST" value="Not tracked" />
+              <SummaryCard label="GST Paid (on purchases)" value={fmtINR(gst.gstPaid)} />
             </div>
           )}
           <p className="text-xs text-muted mt-4">
-            CGST/SGST assumes all sales are intra-state — the app doesn't currently record buyer location or transaction type, so IGST can't be split out separately. "GST Paid" (on purchases) isn't shown since the Purchases module isn't built yet.
+            CGST/SGST assumes all sales are intra-state — the app doesn't currently record buyer location or transaction type, so IGST can't be split out separately.
           </p>
+        </>
+      )}
+
+      {tab === "purchase" && (
+        <>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3 print:hidden">
+            <p className="text-sm text-muted">{from.toLocaleDateString("en-IN")} — {to.toLocaleDateString("en-IN")}</p>
+            <ExportButtons onPrint={printReport} onExport={exportPurchaseExcel} />
+          </div>
+          {RangePicker}
+          {loadingPurchases ? (
+            <div className="text-muted text-sm">Loading…</div>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 mb-6">
+                <SummaryCard label="Total Purchase Value" value={fmtINR(purchaseSummary.totalPurchaseValue)} />
+                <SummaryCard label="Total Quantity Purchased" value={String(purchaseSummary.totalQty)} />
+                <SummaryCard label="Purchase Bills" value={String(purchases.length)} />
+              </div>
+
+              <div className="bg-surface border border-border rounded-xl p-5 mb-6">
+                <h2 className="font-semibold font-display mb-4">Supplier-wise Purchases</h2>
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-[11px] uppercase tracking-wider text-muted border-b border-border">
+                      <th className="py-2 font-medium">Supplier</th>
+                      <th className="py-2 font-medium text-right">Bills</th>
+                      <th className="py-2 font-medium text-right">Purchase Value</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {purchaseSummary.bySupplier.map((s) => (
+                      <tr key={s.supplier} className="border-b border-border last:border-0">
+                        <td className="py-2">{s.supplier}</td>
+                        <td className="py-2 text-right font-mono">{s.bills}</td>
+                        <td className="py-2 text-right font-mono">{fmtINR(s.value)}</td>
+                      </tr>
+                    ))}
+                    {purchaseSummary.bySupplier.length === 0 && <tr><td colSpan={3} className="py-6 text-center text-muted">No purchases in this period.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="bg-surface border border-border rounded-xl p-5">
+                <h2 className="font-semibold font-display mb-4">Product-wise Purchases</h2>
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-[11px] uppercase tracking-wider text-muted border-b border-border">
+                      <th className="py-2 font-medium">Product</th>
+                      <th className="py-2 font-medium text-right">Qty Purchased</th>
+                      <th className="py-2 font-medium text-right">Purchase Value</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {purchaseSummary.byProduct.map((p) => (
+                      <tr key={p.product} className="border-b border-border last:border-0">
+                        <td className="py-2">{p.product}</td>
+                        <td className="py-2 text-right font-mono">{p.qty}</td>
+                        <td className="py-2 text-right font-mono">{fmtINR(p.value)}</td>
+                      </tr>
+                    ))}
+                    {purchaseSummary.byProduct.length === 0 && <tr><td colSpan={3} className="py-6 text-center text-muted">No purchases in this period.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
         </>
       )}
 
