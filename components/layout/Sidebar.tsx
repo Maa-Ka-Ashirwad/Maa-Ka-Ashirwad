@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { LayoutDashboard, ShoppingCart, Package, FileBarChart2, Users, Truck, Settings, LogOut, AlertTriangle } from "lucide-react";
+import { LayoutDashboard, ShoppingCart, Package, FileBarChart2, Users, Truck, Settings, LogOut, AlertTriangle, ClipboardList } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 
 const LINKS = [
@@ -10,6 +10,7 @@ const LINKS = [
   { href: "/pos", label: "Billing (POS)", icon: ShoppingCart },
   { href: "/products", label: "Products", icon: Package },
   { href: "/expiry", label: "Expiry Alerts", icon: AlertTriangle },
+  { href: "/purchases", label: "Purchases", icon: ClipboardList },
   { href: "/customers", label: "Customers", icon: Users },
   { href: "/suppliers", label: "Suppliers", icon: Truck },
   { href: "/reports", label: "Reports", icon: FileBarChart2 },
