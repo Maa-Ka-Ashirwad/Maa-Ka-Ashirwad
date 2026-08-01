@@ -7,3 +7,25 @@
 html, body {
   height: 100%;
 }
+
+/* Print Bill support — hides everything except the receipt, and sizes it
+   for a thermal printer (58mm/80mm). Browsers let the user pick A4 or a
+   thermal roll size in the print dialog; this just keeps the layout narrow
+   and clean either way. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .print-receipt,
+  .print-receipt * {
+    visibility: visible;
+  }
+  .print-receipt {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 80mm;
+    background: white !important;
+    color: black !important;
+  }
+}
