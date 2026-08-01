@@ -126,6 +126,8 @@ export type StoreSettings = {
   gstin: string | null;
   address: string | null;
   phone: string | null;
+  email: string | null;
+  pan: string | null;
   default_gst_rate: number;
   invoice_prefix: string;
   next_invoice_seq: number;
