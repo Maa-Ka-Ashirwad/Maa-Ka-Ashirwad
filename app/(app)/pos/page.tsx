@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { Search, Plus, Minus, Trash2, ShoppingCart, Percent, Banknote, Smartphone, CreditCard, CheckCircle2 } from "lucide-react";
+import { Search, Plus, Minus, Trash2, ShoppingCart, Percent, Banknote, Smartphone, CreditCard, CheckCircle2, AlertTriangle } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import type { Product } from "@/types/database";
 import { fmtINR } from "@/lib/format";
 import { Receipt, type BillItem } from "@/components/pos/Receipt";
+import { daysRemaining, expiryStatus } from "@/lib/expiry";
 
 type CartItem = Product & { qty: number };
 
@@ -26,7 +27,6 @@ export default function POSPage() {
 
   useEffect(() => {
     loadProducts();
-    // Live stock — if another till sells the last unit, this list updates instantly.
     const channel = supabase
       .channel("pos-products")
       .on("postgres_changes", { event: "*", schema: "public", table: "products" }, loadProducts)
@@ -41,6 +41,18 @@ export default function POSPage() {
   );
 
   const addToCart = (p: Product) => {
+    const status = expiryStatus(p.expiry_date);
+    const days = daysRemaining(p.expiry_date);
+
+    if (status === "expired") {
+      alert("This product has expired and cannot be sold.");
+      return;
+    }
+    if (status === "warning-20") {
+      const proceed = confirm(`Warning: This product will expire in ${days} days. Continue adding it to the bill?`);
+      if (!proceed) return;
+    }
+
     setCart((c) => {
       const existing = c.find((i) => i.id === p.id);
       if (existing) return c.map((i) => (i.id === p.id ? { ...i, qty: i.qty + 1 } : i));
@@ -59,6 +71,15 @@ export default function POSPage() {
 
   const chargeBill = async () => {
     if (cart.length === 0) return;
+
+    // Final safety check — block checkout if anything in the cart expired
+    // between being added and now (e.g. a long browsing session overnight).
+    const expiredInCart = cart.find((i) => expiryStatus(i.expiry_date) === "expired");
+    if (expiredInCart) {
+      alert(`"${expiredInCart.name}" has expired and cannot be sold. Please remove it from the cart.`);
+      return;
+    }
+
     setCharging(true);
 
     const payload = {
@@ -78,9 +99,6 @@ export default function POSPage() {
       })),
     };
 
-    // Single atomic RPC — inserts the sale + line items + decrements stock
-    // server-side (see supabase/schema.sql: create_sale). Either all of it
-    // commits or none of it does.
     const { data, error } = await supabase.rpc("create_sale", { payload } as never);
     setCharging(false);
 
@@ -129,16 +147,27 @@ export default function POSPage() {
         <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3">
           {filtered.map((p) => {
             const low = p.current_stock <= p.min_stock;
+            const status = expiryStatus(p.expiry_date);
+            const expired = status === "expired";
+            const nearExpiry = status === "warning-20";
             return (
               <button
                 key={p.id}
                 onClick={() => addToCart(p)}
-                disabled={p.current_stock <= 0}
-                className="text-left bg-surface border border-border rounded-lg p-3.5 hover:border-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed group"
+                disabled={p.current_stock <= 0 || expired}
+                className="text-left bg-surface border border-border rounded-lg p-3.5 hover:border-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed group relative"
               >
+                {expired && (
+                  <span className="absolute top-2 right-2 text-[10px] font-semibold px-1.5 py-0.5 rounded bg-bad/20 text-bad">EXPIRED</span>
+                )}
+                {!expired && nearExpiry && (
+                  <span className="absolute top-2 right-2 text-[10px] font-semibold px-1.5 py-0.5 rounded bg-[#F2A93B]/20 text-[#F2A93B] flex items-center gap-0.5">
+                    <AlertTriangle size={10} /> Soon
+                  </span>
+                )}
                 <div className="flex items-start justify-between gap-1">
-                  <span className="text-sm font-medium leading-snug">{p.name}</span>
-                  <Plus size={14} className="text-muted group-hover:text-accent shrink-0 mt-0.5" />
+                  <span className="text-sm font-medium leading-snug pr-10">{p.name}</span>
+                  {!expired && <Plus size={14} className="text-muted group-hover:text-accent shrink-0 mt-0.5" />}
                 </div>
                 <div className="text-xs text-muted font-mono mt-1">{p.sku}</div>
                 <div className="flex items-center justify-between mt-2.5">
