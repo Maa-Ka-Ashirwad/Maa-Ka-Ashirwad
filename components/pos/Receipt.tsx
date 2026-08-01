@@ -1,6 +1,6 @@
 import { fmtINR } from "@/lib/format";
 
-export type BillItem = { name: string; qty: number; price: number };
+export type BillItem = { name: string; qty: number; price: number; gstRate?: number };
 
 export function Receipt({
   bill,
@@ -14,13 +14,16 @@ export function Receipt({
     discountPct: number;
     grandTotal: number;
     payment: string;
+    customerName?: string;
+    createdAt?: string;
   };
 }) {
   const storeName = process.env.NEXT_PUBLIC_STORE_NAME ?? "Maa Ka Aashirwad Supermarket";
   const gstin = process.env.NEXT_PUBLIC_STORE_GSTIN ?? "";
+  const dt = bill.createdAt ? new Date(bill.createdAt) : new Date();
 
   return (
-    <div className="bg-ink text-base rounded-md p-4 font-mono text-xs">
+    <div className="print-receipt bg-ink text-base rounded-md p-4 font-mono text-xs">
       <div className="text-center mb-2">
         <div className="font-display font-bold text-sm tracking-wide uppercase">{storeName}</div>
         {gstin && <div className="text-[10px] mt-1 opacity-70">GSTIN {gstin}</div>}
@@ -28,8 +31,11 @@ export function Receipt({
       <div className="border-t border-dashed border-base/40 my-2" />
       <div className="flex justify-between">
         <span>{bill.invoice_number}</span>
-        <span>{new Date().toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}</span>
+        <span>{dt.toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}</span>
       </div>
+      {bill.customerName && (
+        <div className="mt-1"><span className="opacity-70">Customer: </span>{bill.customerName}</div>
+      )}
       <div className="border-t border-dashed border-base/40 my-2" />
       {bill.items.map((i, idx) => (
         <div key={idx} className="flex justify-between py-0.5">
@@ -46,6 +52,7 @@ export function Receipt({
       <div className="border-t border-dashed border-base/40 my-2" />
       <div className="flex justify-between font-bold text-sm"><span>TOTAL</span><span>{fmtINR(bill.grandTotal)}</span></div>
       <div className="flex justify-between mt-1 opacity-70 capitalize"><span>Paid via</span><span>{bill.payment}</span></div>
+      <div className="text-center mt-3 opacity-70">Thank You! Visit Again</div>
     </div>
   );
 }
