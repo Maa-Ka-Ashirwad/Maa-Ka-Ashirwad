@@ -3,22 +3,42 @@
 import { useEffect, useState, useCallback } from "react";
 import { Search, Plus, X } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
-import type { Product } from "@/types/database";
+import type { Product, Supplier } from "@/types/database";
 import { fmtINR } from "@/lib/format";
+import { daysRemaining, expiryStatus, expiryColorClasses, expiryLabel } from "@/lib/expiry";
 
-const emptyForm = { name: "", sku: "", unit: "pcs", purchase_price: "", selling_price: "", gst_rate: "5", current_stock: "", min_stock: "" };
+const emptyForm = {
+  name: "",
+  sku: "",
+  unit: "pcs",
+  purchase_price: "",
+  selling_price: "",
+  gst_rate: "5",
+  current_stock: "",
+  min_stock: "",
+  expiry_date: "",
+  batch_number: "",
+  mfg_date: "",
+  purchase_date: "",
+  supplier_id: "",
+};
 
 export default function ProductsPage() {
   const supabase = createClient();
   const [products, setProducts] = useState<Product[]>([]);
+  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [query, setQuery] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
-    const { data } = await supabase.from("products").select("*").eq("is_active", true).order("created_at", { ascending: false });
-    setProducts(data ?? []);
+    const [{ data: productsData }, { data: suppliersData }] = await Promise.all([
+      supabase.from("products").select("*").eq("is_active", true).order("created_at", { ascending: false }),
+      supabase.from("suppliers").select("*").order("name"),
+    ]);
+    setProducts(productsData ?? []);
+    setSuppliers(suppliersData ?? []);
   }, [supabase]);
 
   useEffect(() => {
@@ -36,6 +56,10 @@ export default function ProductsPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!form.expiry_date) {
+      alert("Expiry date is required.");
+      return;
+    }
     setSaving(true);
     const { error } = await supabase.from("products").insert({
       name: form.name,
@@ -46,6 +70,11 @@ export default function ProductsPage() {
       gst_rate: Number(form.gst_rate) || 0,
       current_stock: Number(form.current_stock) || 0,
       min_stock: Number(form.min_stock) || 0,
+      expiry_date: form.expiry_date,
+      batch_number: form.batch_number || null,
+      mfg_date: form.mfg_date || null,
+      purchase_date: form.purchase_date || null,
+      supplier_id: form.supplier_id || null,
     });
     setSaving(false);
     if (error) {
@@ -80,7 +109,7 @@ export default function ProductsPage() {
       </div>
 
       <div className="bg-surface border border-border rounded-xl overflow-hidden overflow-x-auto">
-        <table className="w-full text-sm min-w-[720px]">
+        <table className="w-full text-sm min-w-[820px]">
           <thead>
             <tr className="text-left text-[11px] uppercase tracking-wider text-muted border-b border-border">
               <th className="px-4 py-3 font-medium">Product</th>
@@ -88,11 +117,14 @@ export default function ProductsPage() {
               <th className="px-4 py-3 font-medium text-right">Price</th>
               <th className="px-4 py-3 font-medium text-right">GST</th>
               <th className="px-4 py-3 font-medium text-right">Stock</th>
+              <th className="px-4 py-3 font-medium">Expiry</th>
             </tr>
           </thead>
           <tbody>
             {filtered.map((p) => {
               const low = p.current_stock <= p.min_stock;
+              const days = daysRemaining(p.expiry_date);
+              const status = expiryStatus(p.expiry_date);
               return (
                 <tr key={p.id} className="border-b border-border last:border-0 hover:bg-surface-elevated/60">
                   <td className="px-4 py-3 font-medium">{p.name}</td>
@@ -104,12 +136,17 @@ export default function ProductsPage() {
                       {p.current_stock} {p.unit}
                     </span>
                   </td>
+                  <td className="px-4 py-3">
+                    <span className={`text-xs font-medium px-2 py-0.5 rounded ${expiryColorClasses(status)}`}>
+                      {expiryLabel(status, days)}
+                    </span>
+                  </td>
                 </tr>
               );
             })}
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={5} className="px-4 py-8 text-center text-muted">No products yet — add your first one.</td>
+                <td colSpan={6} className="px-4 py-8 text-center text-muted">No products yet — add your first one.</td>
               </tr>
             )}
           </tbody>
@@ -118,7 +155,7 @@ export default function ProductsPage() {
 
       {showForm && (
         <div className="fixed inset-0 bg-black/60 z-40 flex items-center justify-center p-4" onClick={() => setShowForm(false)}>
-          <form onClick={(e) => e.stopPropagation()} onSubmit={handleSubmit} className="bg-surface border border-border rounded-xl p-6 w-full max-w-md">
+          <form onClick={(e) => e.stopPropagation()} onSubmit={handleSubmit} className="bg-surface border border-border rounded-xl p-6 w-full max-w-md max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
               <h2 className="font-semibold font-display">Add Product</h2>
               <button type="button" onClick={() => setShowForm(false)} className="text-muted hover:text-ink">
@@ -136,6 +173,31 @@ export default function ProductsPage() {
                 <Field label="GST %" value={form.gst_rate} onChange={(v) => setForm({ ...form, gst_rate: v })} type="number" />
                 <Field label="Stock" value={form.current_stock} onChange={(v) => setForm({ ...form, current_stock: v })} type="number" />
                 <Field label="Min stock" value={form.min_stock} onChange={(v) => setForm({ ...form, min_stock: v })} type="number" />
+              </div>
+
+              <div className="border-t border-border pt-3 mt-1">
+                <p className="text-xs uppercase tracking-wider text-muted mb-2">Expiry & Batch</p>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Expiry date *" value={form.expiry_date} onChange={(v) => setForm({ ...form, expiry_date: v })} type="date" required />
+                  <Field label="Batch number" value={form.batch_number} onChange={(v) => setForm({ ...form, batch_number: v })} />
+                </div>
+                <div className="grid grid-cols-2 gap-3 mt-3">
+                  <Field label="Mfg. date" value={form.mfg_date} onChange={(v) => setForm({ ...form, mfg_date: v })} type="date" />
+                  <Field label="Purchase date" value={form.purchase_date} onChange={(v) => setForm({ ...form, purchase_date: v })} type="date" />
+                </div>
+                <div className="mt-3">
+                  <label className="block text-xs text-muted mb-1">Supplier</label>
+                  <select
+                    value={form.supplier_id}
+                    onChange={(e) => setForm({ ...form, supplier_id: e.target.value })}
+                    className="w-full bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent"
+                  >
+                    <option value="">— None —</option>
+                    {suppliers.map((s) => (
+                      <option key={s.id} value={s.id}>{s.name}</option>
+                    ))}
+                  </select>
+                </div>
               </div>
             </div>
             <button type="submit" disabled={saving} className="w-full mt-5 bg-accent text-base font-semibold text-sm py-2.5 rounded-lg hover:brightness-105 disabled:opacity-50">
