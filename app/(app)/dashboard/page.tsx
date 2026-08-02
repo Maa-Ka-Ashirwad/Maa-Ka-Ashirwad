@@ -1,11 +1,13 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState, useCallback } from "react";
 import { AlertTriangle, TrendingUp, Package, FileBarChart2, Clock, CheckCircle2, Wallet } from "lucide-react";
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import { createClient } from "@/lib/supabase/client";
 import type { Product, Sale, SaleItem } from "@/types/database";
 import { KPICard } from "@/components/dashboard/KPICard";
+import { InsightsPanel } from "@/components/dashboard/InsightsPanel";
 import { fmtINR } from "@/lib/format";
 
 export default function DashboardPage() {
@@ -97,12 +99,24 @@ export default function DashboardPage() {
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
-        <KPICard label="Today's Sales" value={fmtINR(todayRevenue)} icon={TrendingUp} accent="#F2A93B" />
-        <KPICard label="Today's Profit" value={fmtINR(todayProfit)} icon={Wallet} accent="#7FBF9E" />
-        <KPICard label="Today's Bills" value={String(todaySales.length)} icon={FileBarChart2} accent="#C1443A" />
-        <KPICard label="Stock Value" value={fmtINR(stockValue)} icon={Package} accent="#6FA8DC" />
-        <KPICard label="Low Stock Items" value={String(lowStock.length)} icon={AlertTriangle} accent="#E08B7D" />
+        <Link href="/reports?tab=sales" className="block hover:opacity-90 transition-opacity">
+          <KPICard label="Today's Sales" value={fmtINR(todayRevenue)} icon={TrendingUp} accent="#F2A93B" />
+        </Link>
+        <Link href="/reports?tab=pnl" className="block hover:opacity-90 transition-opacity">
+          <KPICard label="Today's Profit" value={fmtINR(todayProfit)} icon={Wallet} accent="#7FBF9E" />
+        </Link>
+        <Link href="/reports?tab=sales" className="block hover:opacity-90 transition-opacity">
+          <KPICard label="Today's Bills" value={String(todaySales.length)} icon={FileBarChart2} accent="#C1443A" />
+        </Link>
+        <Link href="/reports?tab=stock" className="block hover:opacity-90 transition-opacity">
+          <KPICard label="Stock Value" value={fmtINR(stockValue)} icon={Package} accent="#6FA8DC" />
+        </Link>
+        <Link href="/reports?tab=stock&filter=low" className="block hover:opacity-90 transition-opacity">
+          <KPICard label="Low Stock Items" value={String(lowStock.length)} icon={AlertTriangle} accent="#E08B7D" />
+        </Link>
       </div>
+
+      <InsightsPanel />
 
       <div className="bg-surface border border-border rounded-xl p-5">
         <div className="flex items-center justify-between mb-4">
