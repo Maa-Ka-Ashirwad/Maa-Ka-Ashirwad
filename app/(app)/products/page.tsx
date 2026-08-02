@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { Search, Plus, X } from "lucide-react";
+import { Search, Plus, X, Trash2 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import type { Product, Supplier } from "@/types/database";
 import { fmtINR } from "@/lib/format";
@@ -53,6 +53,18 @@ export default function ProductsPage() {
   }, [supabase, load]);
 
   const filtered = products.filter((p) => p.name.toLowerCase().includes(query.toLowerCase()) || p.sku.toLowerCase().includes(query.toLowerCase()));
+
+  const handleDelete = async (product: Product) => {
+    if (!confirm(`Delete "${product.name}"? This requires the security password.`)) return;
+    const password = prompt("Enter security password to confirm deletion:");
+    if (!password) return;
+    const { error } = await supabase.rpc("secure_delete_product", { product_id: product.id, security_password: password });
+    if (error) {
+      alert(error.message.includes("Incorrect") ? "Incorrect security password." : error.message);
+      return;
+    }
+    // list refreshes automatically via the realtime subscription
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -118,6 +130,7 @@ export default function ProductsPage() {
               <th className="px-4 py-3 font-medium text-right">GST</th>
               <th className="px-4 py-3 font-medium text-right">Stock</th>
               <th className="px-4 py-3 font-medium">Expiry</th>
+              <th className="px-4 py-3 font-medium text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -141,12 +154,17 @@ export default function ProductsPage() {
                       {expiryLabel(status, days)}
                     </span>
                   </td>
+                  <td className="px-4 py-3 text-right">
+                    <button onClick={() => handleDelete(p)} title="Delete (requires security password)" className="w-7 h-7 inline-flex items-center justify-center rounded bg-surface-elevated hover:text-bad">
+                      <Trash2 size={13} />
+                    </button>
+                  </td>
                 </tr>
               );
             })}
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-muted">No products yet — add your first one.</td>
+                <td colSpan={7} className="px-4 py-8 text-center text-muted">No products yet — add your first one.</td>
               </tr>
             )}
           </tbody>
