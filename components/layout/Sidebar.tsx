@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { LayoutDashboard, ShoppingCart, Package, FileBarChart2, Users, Truck, Settings, LogOut, AlertTriangle, ClipboardList } from "lucide-react";
+import { LayoutDashboard, ShoppingCart, Package, FileBarChart2, Users, Truck, Settings, LogOut, AlertTriangle, ClipboardList, ScrollText } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 
 const LINKS = [
@@ -15,6 +15,7 @@ const LINKS = [
   { href: "/suppliers", label: "Suppliers", icon: Truck },
   { href: "/reports", label: "Reports", icon: FileBarChart2 },
   { href: "/settings", label: "Settings", icon: Settings },
+  { href: "/audit-log", label: "Audit Log", icon: ScrollText },
 ];
 
 export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
